@@ -6,83 +6,137 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"net"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-func TestDummy2(t *testing.T) {
-	quit := make(chan struct{})
-	clientGroup := &sync.WaitGroup{}
-
-	var n int64
-	h := func(code EventCode, payload []byte, err error) (resp []byte, rerr error) {
-		if code == Received && len(payload) > 0 {
-			n, _ = strconv.ParseInt(strings.Trim(string(payload), "\n"), 10, 64)
-			n++
-			resp = []byte(fmt.Sprintf("%d\n", n))
-		}
-
+func TestExample(t *testing.T) {
+	srv, err := New(portString, handlerFactory)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	err = srv.Start()
+	if err != nil {
+		t.Error(err)
 		return
 	}
 
-	srv, err := Init(Conf{Address: portString, AcceptorCount: 2, EventHandler: h, QuitSignal: quit, ClientTimeout: time.Millisecond * 1200, ClientGroup: clientGroup})
-	if err != nil {
-		t.Error(err)
+	for i := 1; i <= 500; i++ {
+		i := i
+		wg.Add(1)
+		go echoClient(t, i*73)
+		time.Sleep(time.Millisecond)
 	}
-	_ = srv
-	defer close(quit)
 
-	done := make(chan struct{})
-	go testClient(t, done)
-	<-done
+	wg.Wait()
 
-	if n != 11 {
-		t.Log(n)
-		t.Fail()
+	srv.Stop()
+	waitSrv := make(chan struct{})
+	go func() {
+		srv.Wait()
+		close(waitSrv)
+	}()
+	select {
+	case <-waitSrv:
+	case <-time.After(time.Second * 3):
 	}
 }
 
-var (
-	portString = fmt.Sprintf(":%d", port)
-)
+func handlerFactory(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, quit chan struct{}) Handler {
+	return &echoHandler{conn, reader, writer, quit}
+}
 
-const (
-	port = 37073
-)
+type echoHandler struct {
+	conn   net.Conn
+	reader *bufio.Reader
+	writer *bufio.Writer
+	quit   chan struct{}
+}
 
-func testClient(t *testing.T, done chan struct{}) {
-	defer close(done)
+func (x *echoHandler) Handle() {
+	for {
+		x.conn.SetDeadline(time.Now().Add(time.Second * 3))
+		select {
+		case <-x.quit:
+			return
+		default:
+		}
+		line, err := x.reader.ReadBytes('\n')
+		if err != nil {
+			if err != io.EOF {
+				log.Println(`error:`, err)
+			}
+			return
+		}
+		_, err = x.writer.Write(line)
+		if err != nil {
+			if err != io.EOF {
+				log.Println(`error:`, err)
+			}
+			return
+		}
+		err = x.writer.Flush()
+		if err != nil {
+			if err != io.EOF {
+				log.Println(`error:`, err)
+			}
+			return
+		}
+	}
+}
 
+func echoClient(t *testing.T, seed int) {
+	defer wg.Done()
 	conn, err := net.Dial("tcp", fmt.Sprintf("localhost%s", portString))
 	if err != nil {
 		t.Error(err)
-		t.Fatal("Failed to connect to test server")
-		t.Fail()
+		return
 	}
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 
-	var counter int64
-	for counter < 11 {
-		msg := fmt.Sprintf("%d\n", counter)
+	c := seed
+	for c < 10 {
+		msg := fmt.Sprintf("%d\n", c)
 		writer.Write([]byte(msg))
 		writer.Flush()
 
 		line, err := reader.ReadBytes('\n')
 		if err == io.EOF {
+			t.Error(err)
 			return
 		}
 		if neterr, ok := err.(net.Error); ok && neterr.Timeout() {
+			t.Error(err)
 			return
 		}
 
-		counter, _ = strconv.ParseInt(strings.Trim(string(line), "\n"), 10, 64)
-		counter++
+		if string(line) != msg {
+			t.Fatal()
+		}
+
+		select {
+		case <-quit:
+			return
+		default:
+		}
+
+		c++
 	}
 }
+
+var (
+	quit       = make(chan struct{})
+	wg         = &sync.WaitGroup{}
+	portString = fmt.Sprintf(":%d", port)
+)
+
+const (
+	port = 37073
+)

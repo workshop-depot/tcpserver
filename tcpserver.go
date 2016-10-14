@@ -5,140 +5,113 @@ package tcpserver
 
 import (
 	"bufio"
-	"bytes"
-	"fmt"
+	"log"
 	"net"
 	"runtime"
 	"sync"
-	"time"
 )
 
 //-----------------------------------------------------------------------------
-// definitions
 
-//Error constant error based on http://dave.cheney.net/2016/04/07/constant-errors
+// Handler handles
+type Handler interface {
+	Handle()
+}
+
+// Server /
+type Server interface {
+	Start() error
+	Stop() error
+	Wait()
+	// Handler factory
+	Make(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Handler
+}
+
+//-----------------------------------------------------------------------------
+
+// Error constant error based on http://dave.cheney.net/2016/04/07/constant-errors
 type Error string
 
 func (e Error) Error() string { return string(e) }
 
-//EventHandler gets called on each event
-//	myEventHandler(
-//		event_code,
-//		payload, //received or sent
-//		error) (payload_to_send, error)
-type EventHandler func(EventCode, []byte, error) ([]byte, error)
-
-const (
-	//None +
-	None EventCode = iota
-	//Connected +
-	Connected
-	//Closed +
-	Closed
-	//Received +
-	Received
-	//Sent +
-	Sent
-)
-
-//EventCode +
-type EventCode int
-
-func (c EventCode) String() string {
-	switch c {
-	case Connected:
-		return "connected"
-	case Closed:
-		return "closed"
-	case Received:
-		return "received"
-	case Sent:
-		return "sent"
-	case None:
-		return "none"
-	}
-
-	panic(`not a valid EventCode`)
-}
+//-----------------------------------------------------------------------------
 
 // Errors
 const (
-	NoHandlerErr    = Error(`NO HANDLER PROVIDED`)
-	NoQuitSignalErr = Error(`NO QUIT SIGNAL PROVIDED`)
-
-	//ErrClose return this from handler, means force close connection
-	ErrClose = Error("CLOSE")
+	ErrNoHandlerFactory = Error(`NO HANDLER FACTORY PROVIDED`)
 )
 
 //-----------------------------------------------------------------------------
-// server definition
 
-// Init inits a tcp server
-func Init(conf Conf) (*Server, error) {
-	if conf.AcceptorCount <= 0 {
-		cpuNum := runtime.NumCPU()
-		if cpuNum < 0 {
-			cpuNum = 1
-		}
-		conf.AcceptorCount = cpuNum
-	}
+// tcpServer a tcp server - ? acceptor count
+type tcpServer struct {
+	address        string
+	handlerFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Handler
+	quit           chan struct{}
+	handlerGroup   *sync.WaitGroup
+}
 
-	if conf.EventHandler == nil {
-		return nil, NoHandlerErr
-	}
-
-	if conf.ClientTimeout <= 0 {
-		conf.ClientTimeout = time.Second * 30
-	}
-
-	if conf.ClientGroup == nil {
-		conf.ClientGroup = &sync.WaitGroup{}
-	}
-
-	result := new(Server)
-	result.conf = conf
-
-	loop, err := result.loopMaker()
+// Start implements Server
+func (x *tcpServer) Start() error {
+	loop, err := x.loopMaker()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	go loop()
 
-	return result, nil
+	return nil
 }
 
-// Server a tcp server
-type Server struct {
-	conf Conf
+// Stop implements Server
+func (x *tcpServer) Stop() error {
+	close(x.quit)
+	return nil
 }
 
-// Conf tcp server conf
-type Conf struct {
-	Address       string
-	AcceptorCount int
-	EventHandler  EventHandler
-	QuitSignal    <-chan struct{}
-	ClientTimeout time.Duration
-	ClientGroup   *sync.WaitGroup
+// Wait implements Server
+func (x *tcpServer) Wait() { x.handlerGroup.Wait() }
+
+// Make implements Server
+func (x *tcpServer) Make(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, quit chan struct{}) Handler {
+	return x.handlerFactory(conn, reader, writer, quit)
 }
 
 //-----------------------------------------------------------------------------
-// server methods
+
+// New /
+func New(address string, handlerFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Handler) (Server, error) {
+	if handlerFactory == nil {
+		return nil, ErrNoHandlerFactory
+	}
+
+	result := new(tcpServer)
+	result.address = address
+	result.handlerFactory = handlerFactory
+	result.quit = make(chan struct{})
+	result.handlerGroup = &sync.WaitGroup{}
+
+	return result, nil
+}
+
+//-----------------------------------------------------------------------------
 
 // loopMaker returns a loop (should go routine) and probably an error
-func (srv *Server) loopMaker() (func(), error) {
-	conf := &srv.conf
-
-	listener, err := net.Listen("tcp", conf.Address)
+func (x *tcpServer) loopMaker() (func(), error) {
+	listener, err := net.Listen("tcp", x.address)
 	if err != nil {
 		return nil, err
 	}
 
-	accepts := make(chan net.Conn, conf.AcceptorCount)
+	cpuNum := runtime.NumCPU()
+	acceptorCount := cpuNum
+	if acceptorCount <= 0 {
+		acceptorCount = 1
+	}
+	accepts := make(chan net.Conn, acceptorCount)
 
-	for i := 0; i < conf.AcceptorCount; i++ {
-		go srv.acceptor(accepts)
+	for i := 0; i < acceptorCount; i++ {
+		go x.acceptor(accepts)
 	}
 
 	loop := func() {
@@ -152,7 +125,7 @@ func (srv *Server) loopMaker() (func(), error) {
 			}
 
 			select {
-			case <-conf.QuitSignal:
+			case <-x.quit:
 				close(accepts)
 				return
 			case accepts <- conn:
@@ -163,88 +136,26 @@ func (srv *Server) loopMaker() (func(), error) {
 	return loop, nil
 }
 
-func (srv *Server) acceptor(accepts chan net.Conn) {
+func (x *tcpServer) acceptor(accepts chan net.Conn) {
 	for conn := range accepts {
-		srv.conf.ClientGroup.Add(1)
-		go srv.handler(conn)
+		x.handlerGroup.Add(1)
+		go x.handler(conn)
 	}
 }
 
-func (srv *Server) handler(conn net.Conn) {
-	conf := &srv.conf
-	defer func() {
-		conf.ClientGroup.Done()
-	}()
-
+func (x *tcpServer) handler(conn net.Conn) {
+	defer x.handlerGroup.Done()
 	defer func() {
 		if r := recover(); r != nil {
-			conf.EventHandler(None, nil, Error(fmt.Sprintf("%v", r)))
+			log.Println(`error:`, `handler parent go-routine`, r)
 		}
 	}()
-	defer srv.closeConnection(conn, nil)
+	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
-
-	conf.EventHandler(Connected, nil, nil)
-
-	if conf.ClientTimeout > 0 {
-		conn.SetDeadline(time.Now().Add(conf.ClientTimeout))
-	}
-	for {
-		select {
-		case <-conf.QuitSignal:
-			return
-		default:
-			line, err := reader.ReadBytes('\n')
-			if err != nil {
-				return
-			}
-			sending := true
-			outgoingPayload, err := conf.EventHandler(Received, line, nil)
-			if err != nil && err == ErrClose {
-				return
-			}
-			select {
-			case <-conf.QuitSignal:
-				return
-			default:
-			}
-
-			for sending {
-				if outgoingPayload == nil || len(bytes.TrimSpace(outgoingPayload)) == 0 {
-					sending = false
-					break
-				}
-
-				_, sendErr := writer.Write(outgoingPayload)
-				if sendErr != nil {
-					conf.EventHandler(Sent, outgoingPayload, sendErr)
-					return
-				}
-
-				sendErr = writer.Flush()
-				if sendErr != nil {
-					conf.EventHandler(Sent, outgoingPayload, sendErr)
-					return
-				}
-
-				outgoingPayload, err = conf.EventHandler(Sent, outgoingPayload, nil)
-				if err != nil && err == ErrClose {
-					return
-				}
-			}
-		}
-
-		if conf.ClientTimeout > 0 {
-			conn.SetDeadline(time.Now().Add(conf.ClientTimeout))
-		}
-	}
-}
-
-func (srv *Server) closeConnection(conn net.Conn, err error) {
-	conn.Close()
-	srv.conf.EventHandler(Closed, nil, err)
+	h := x.Make(conn, reader, writer, x.quit)
+	h.Handle()
 }
 
 //-----------------------------------------------------------------------------

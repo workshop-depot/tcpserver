@@ -1,6 +1,4 @@
 //Package tcpserver implements a tcp server with simple and clean API.
-//
-//Copyright 2016 Kaveh Shahbazian (See LICENSE file)
 package tcpserver
 
 import (
@@ -13,18 +11,10 @@ import (
 
 //-----------------------------------------------------------------------------
 
-// Handler handles
-type Handler interface {
-	Handle()
-}
-
-// Server /
-type Server interface {
-	Start() error
-	Stop() error
-	Wait()
-	// Handler factory
-	Make(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Handler
+// Processor is where our protocol is implemented (Thanks to William @goinggodotnet for name suggestion)
+type Processor interface {
+	// Process will get called in a loop as long as no errors got returned
+	Process() error
 }
 
 //-----------------------------------------------------------------------------
@@ -38,21 +28,22 @@ func (e Error) Error() string { return string(e) }
 
 // Errors
 const (
-	ErrNoHandlerFactory = Error(`NO HANDLER FACTORY PROVIDED`)
+	ErrNoProcessorFactory = Error(`NO PROCESSOR FACTORY PROVIDED`)
 )
 
 //-----------------------------------------------------------------------------
 
-// tcpServer a tcp server - ? acceptor count
-type tcpServer struct {
-	address        string
-	handlerFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Handler
-	quit           chan struct{}
-	handlerGroup   *sync.WaitGroup
+// TCPServer a tcp server
+type TCPServer struct {
+	address          string
+	processorFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Processor
+	quit             chan struct{}
+	handlerGroup     *sync.WaitGroup
+	acceptorCount    int
 }
 
-// Start implements Server
-func (x *tcpServer) Start() error {
+// Start starts the server
+func (x *TCPServer) Start() error {
 	loop, err := x.loopMaker()
 	if err != nil {
 		return err
@@ -63,33 +54,39 @@ func (x *tcpServer) Start() error {
 	return nil
 }
 
-// Stop implements Server
-func (x *tcpServer) Stop() error {
+// Stop stops the server
+func (x *TCPServer) Stop() error {
 	close(x.quit)
 	return nil
 }
 
-// Wait implements Server
-func (x *tcpServer) Wait() { x.handlerGroup.Wait() }
-
-// Make implements Server
-func (x *tcpServer) Make(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, quit chan struct{}) Handler {
-	return x.handlerFactory(conn, reader, writer, quit)
-}
+// Wait waits for all handlers to exit
+func (x *TCPServer) Wait() { x.handlerGroup.Wait() }
 
 //-----------------------------------------------------------------------------
 
-// New /
-func New(address string, handlerFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Handler) (Server, error) {
-	if handlerFactory == nil {
-		return nil, ErrNoHandlerFactory
+// New creates a new *TCPServer
+func New(
+	address string,
+	processorFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Processor,
+	acceptorCount ...int) (*TCPServer, error) {
+	if processorFactory == nil {
+		return nil, ErrNoProcessorFactory
 	}
 
-	result := new(tcpServer)
+	result := new(TCPServer)
 	result.address = address
-	result.handlerFactory = handlerFactory
+	result.processorFactory = processorFactory
 	result.quit = make(chan struct{})
 	result.handlerGroup = &sync.WaitGroup{}
+
+	if len(acceptorCount) > 0 {
+		result.acceptorCount = acceptorCount[0]
+	}
+	if result.acceptorCount <= 0 {
+		cpuNum := runtime.NumCPU()
+		result.acceptorCount = cpuNum
+	}
 
 	return result, nil
 }
@@ -97,20 +94,15 @@ func New(address string, handlerFactory func(net.Conn, *bufio.Reader, *bufio.Wri
 //-----------------------------------------------------------------------------
 
 // loopMaker returns a loop (should go routine) and probably an error
-func (x *tcpServer) loopMaker() (func(), error) {
+func (x *TCPServer) loopMaker() (func(), error) {
 	listener, err := net.Listen("tcp", x.address)
 	if err != nil {
 		return nil, err
 	}
 
-	cpuNum := runtime.NumCPU()
-	acceptorCount := cpuNum
-	if acceptorCount <= 0 {
-		acceptorCount = 1
-	}
-	accepts := make(chan net.Conn, acceptorCount)
+	accepts := make(chan net.Conn, x.acceptorCount)
 
-	for i := 0; i < acceptorCount; i++ {
+	for i := 0; i < x.acceptorCount; i++ {
 		go x.acceptor(accepts)
 	}
 
@@ -136,14 +128,16 @@ func (x *tcpServer) loopMaker() (func(), error) {
 	return loop, nil
 }
 
-func (x *tcpServer) acceptor(accepts chan net.Conn) {
+//-----------------------------------------------------------------------------
+
+func (x *TCPServer) acceptor(accepts chan net.Conn) {
 	for conn := range accepts {
 		x.handlerGroup.Add(1)
 		go x.handler(conn)
 	}
 }
 
-func (x *tcpServer) handler(conn net.Conn) {
+func (x *TCPServer) handler(conn net.Conn) {
 	defer x.handlerGroup.Done()
 	defer func() {
 		if r := recover(); r != nil {
@@ -154,8 +148,9 @@ func (x *tcpServer) handler(conn net.Conn) {
 
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
-	h := x.Make(conn, reader, writer, x.quit)
-	h.Handle()
+	processor := x.processorFactory(conn, reader, writer, x.quit)
+	for err := processor.Process(); err == nil; {
+	}
 }
 
 //-----------------------------------------------------------------------------

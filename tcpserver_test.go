@@ -1,5 +1,3 @@
-//Copyright 2016 Kaveh Shahbazian (See LICENSE file)
-
 package tcpserver
 
 import (
@@ -13,8 +11,11 @@ import (
 	"time"
 )
 
-func TestExample(t *testing.T) {
-	srv, err := New(portString, handlerFactory)
+//-----------------------------------------------------------------------------
+// example usage - echo server
+
+func TestEchoServer(t *testing.T) {
+	srv, err := New(portString, newEchoProcessor, 100)
 	if err != nil {
 		t.Error(err)
 		return
@@ -46,48 +47,57 @@ func TestExample(t *testing.T) {
 	}
 }
 
-func handlerFactory(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, quit chan struct{}) Handler {
-	return &echoHandler{conn, reader, writer, quit}
+//-----------------------------------------------------------------------------
+// our echo processor factory
+
+func newEchoProcessor(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, quit chan struct{}) Processor {
+	return &echoProcessor{conn, reader, writer, quit}
 }
 
-type echoHandler struct {
+//-----------------------------------------------------------------------------
+// our echo processor
+
+type echoProcessor struct {
 	conn   net.Conn
 	reader *bufio.Reader
 	writer *bufio.Writer
 	quit   chan struct{}
 }
 
-func (x *echoHandler) Handle() {
-	for {
-		x.conn.SetDeadline(time.Now().Add(time.Second * 3))
-		select {
-		case <-x.quit:
-			return
-		default:
-		}
-		line, err := x.reader.ReadBytes('\n')
-		if err != nil {
-			if err != io.EOF {
-				log.Println(`error:`, err)
-			}
-			return
-		}
-		_, err = x.writer.Write(line)
-		if err != nil {
-			if err != io.EOF {
-				log.Println(`error:`, err)
-			}
-			return
-		}
-		err = x.writer.Flush()
-		if err != nil {
-			if err != io.EOF {
-				log.Println(`error:`, err)
-			}
-			return
-		}
+func (x *echoProcessor) Process() error {
+	x.conn.SetDeadline(time.Now().Add(time.Second * 3))
+	select {
+	case <-x.quit:
+		return Error(`quit`)
+	default:
 	}
+	line, err := x.reader.ReadBytes('\n')
+	if err != nil {
+		if err != io.EOF {
+			log.Println(`error:`, err)
+		}
+		return err
+	}
+	_, err = x.writer.Write(line)
+	if err != nil {
+		if err != io.EOF {
+			log.Println(`error:`, err)
+		}
+		return err
+	}
+	err = x.writer.Flush()
+	if err != nil {
+		if err != io.EOF {
+			log.Println(`error:`, err)
+		}
+		return err
+	}
+
+	return nil
 }
+
+//-----------------------------------------------------------------------------
+// our echo client
 
 func echoClient(t *testing.T, seed int) {
 	defer wg.Done()
@@ -130,6 +140,8 @@ func echoClient(t *testing.T, seed int) {
 		c++
 	}
 }
+
+//-----------------------------------------------------------------------------
 
 var (
 	quit       = make(chan struct{})

@@ -150,6 +150,7 @@ func (x *TCPServer) handler(conn net.Conn) {
 	writer := bufio.NewWriter(conn)
 	processor := x.processorFactory(conn, reader, writer, x.quit)
 	for err := processor.Process(); err == nil; {
+		runtime.Gosched()
 	}
 }
 

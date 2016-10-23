@@ -11,10 +11,11 @@ import (
 
 //-----------------------------------------------------------------------------
 
-// Processor is where our protocol is implemented (Thanks to William @goinggodotnet for name suggestion)
-type Processor interface {
-	// Process will get called in a loop as long as no errors got returned
-	Process() error
+// Agent is a statefull agent that manages a client - where our protocol is implemented.
+type Agent interface {
+	// Next will get called in a loop as long as no errors got returned.
+	// To stop must return an error - like ErrStop.
+	Next() error
 }
 
 //-----------------------------------------------------------------------------
@@ -28,18 +29,19 @@ func (e Error) Error() string { return string(e) }
 
 // Errors
 const (
-	ErrNoProcessorFactory = Error(`NO PROCESSOR FACTORY PROVIDED`)
+	ErrNoAgentFactory = Error(`NO AGENT FACTORY PROVIDED`)
+	ErrStop           = Error(`STOP`)
 )
 
 //-----------------------------------------------------------------------------
 
 // TCPServer a tcp server
 type TCPServer struct {
-	address          string
-	processorFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Processor
-	quit             chan struct{}
-	handlerGroup     *sync.WaitGroup
-	acceptorCount    int
+	address       string
+	agentFactory  func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Agent
+	quit          chan struct{}
+	handlerGroup  *sync.WaitGroup
+	acceptorCount int
 }
 
 // Start starts the server
@@ -68,15 +70,15 @@ func (x *TCPServer) Wait() { x.handlerGroup.Wait() }
 // New creates a new *TCPServer
 func New(
 	address string,
-	processorFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Processor,
+	agentFactory func(net.Conn, *bufio.Reader, *bufio.Writer, chan struct{}) Agent,
 	acceptorCount ...int) (*TCPServer, error) {
-	if processorFactory == nil {
-		return nil, ErrNoProcessorFactory
+	if agentFactory == nil {
+		return nil, ErrNoAgentFactory
 	}
 
 	result := new(TCPServer)
 	result.address = address
-	result.processorFactory = processorFactory
+	result.agentFactory = agentFactory
 	result.quit = make(chan struct{})
 	result.handlerGroup = &sync.WaitGroup{}
 
@@ -148,8 +150,8 @@ func (x *TCPServer) handler(conn net.Conn) {
 
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
-	processor := x.processorFactory(conn, reader, writer, x.quit)
-	for err := processor.Process(); err == nil; {
+	agent := x.agentFactory(conn, reader, writer, x.quit)
+	for err := agent.Next(); err == nil; {
 		runtime.Gosched()
 	}
 }

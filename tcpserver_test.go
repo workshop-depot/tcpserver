@@ -15,7 +15,7 @@ import (
 // example usage - echo server
 
 func TestEchoServer(t *testing.T) {
-	srv, err := New(portString, newEchoProcessor, 100)
+	srv, err := New(portString, newEchoAgent, 100)
 	if err != nil {
 		t.Error(err)
 		return
@@ -48,23 +48,23 @@ func TestEchoServer(t *testing.T) {
 }
 
 //-----------------------------------------------------------------------------
-// our echo processor factory
+// our echo agent factory
 
-func newEchoProcessor(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, quit chan struct{}) Processor {
-	return &echoProcessor{conn, reader, writer, quit}
+func newEchoAgent(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer, quit chan struct{}) Agent {
+	return &echoAgent{conn, reader, writer, quit}
 }
 
 //-----------------------------------------------------------------------------
-// our echo processor
+// our echo agent
 
-type echoProcessor struct {
+type echoAgent struct {
 	conn   net.Conn
 	reader *bufio.Reader
 	writer *bufio.Writer
 	quit   chan struct{}
 }
 
-func (x *echoProcessor) Process() error {
+func (x *echoAgent) Next() error {
 	x.conn.SetDeadline(time.Now().Add(time.Second * 3))
 	select {
 	case <-x.quit:
@@ -152,3 +152,5 @@ var (
 const (
 	port = 37073
 )
+
+//-----------------------------------------------------------------------------

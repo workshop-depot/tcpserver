@@ -13,9 +13,9 @@ import (
 
 // Agent is a statefull agent that manages a client - where our protocol is implemented.
 type Agent interface {
-	// Next will get called in a loop as long as no errors got returned.
+	// Proceed will get called in a loop as long as no errors got returned.
 	// To stop must return an error - like ErrStop.
-	Next() error
+	Proceed() error
 }
 
 //-----------------------------------------------------------------------------
@@ -151,7 +151,7 @@ func (x *TCPServer) handler(conn net.Conn) {
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 	agent := x.agentFactory(conn, reader, writer, x.quit)
-	for err := agent.Next(); err == nil; {
+	for err := agent.Proceed(); err == nil; {
 		runtime.Gosched()
 	}
 }

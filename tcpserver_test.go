@@ -64,7 +64,7 @@ type echoAgent struct {
 	quit   chan struct{}
 }
 
-func (x *echoAgent) Next() error {
+func (x *echoAgent) Proceed() error {
 	x.conn.SetDeadline(time.Now().Add(time.Second * 3))
 	select {
 	case <-x.quit:

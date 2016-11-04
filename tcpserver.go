@@ -151,7 +151,8 @@ func (x *TCPServer) handler(conn net.Conn) {
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 	agent := x.agentFactory(conn, reader, writer, x.quit)
-	for err := agent.Proceed(); err == nil; {
+	var err error
+	for err = agent.Proceed(); err == nil; err = agent.Proceed() {
 		runtime.Gosched()
 	}
 }
